@@ -8,7 +8,7 @@ from pathlib import Path
 import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
-UPSTREAM_REVISION = "ffc142012af63d015fa19f05f29f9c5ff329a2cc"
+UPSTREAM_REVISION = "fe9a6c35023a7d94102e7feaaeaae8857d9d1b07"
 MODELS = {
     "laya": "c5d78730f3493e4fe16d61507ef4b78eef7318cf",
     "laya-multilingual": "052592a15d198d9ad47da779604259b10b47b7aa",

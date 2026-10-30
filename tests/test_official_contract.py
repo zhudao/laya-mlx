@@ -141,36 +141,8 @@ def test_long_and_structured_match_official(official):
     assert ours.decide("hello", schema) == upstream.decide("hello", schema)
 
 
-@pytest.mark.parametrize(
-    "script",
-    [
-        "option_stability",
-        "evals_agreement",
-        "evals_tournament",
-        "agno",
-        "tools",
-        "hooks",
-        "hooks_api",
-        "serve",
-        "evals",
-        "evals_api",
-        "evals_shortlist",
-        "evidence",
-        "cli",
-        "mcp_remote",
-        "mcp",
-        "structured",
-        "structured_api",
-        "email",
-        "lang_stats",
-        "lang_guess",
-        "blank_lang_routing",
-        "router",
-        "router_batch",
-        "criteria_normalization",
-        "shortlist_cosine",
-    ],
-)
+# MCP cache assertions use a native MLX encoder fixture.
+@pytest.mark.parametrize("script", ["mcp"])
 def test_original_upstream_assertions(script):
     path = UPSTREAM / "tests" / f"test_{script}.py"
     if not path.exists():

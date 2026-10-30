@@ -220,3 +220,14 @@ def test_offline_resolution_reaches_hub_cache_without_coreml_controls(tmp_path, 
     assert calls[0][0] == "test/offline"
     with pytest.raises(TypeError, match="compute_units"):
         Router(compute_units="cpu_gpu")
+
+
+@pytest.mark.parametrize("dtype", ["float32", "float16", "bfloat16"])
+def test_lazy_dtype_export_and_native_construction(dtype, tiny_checkpoint):
+    from laya_mlx.agent import DTYPES
+
+    assert DTYPES == {"float32": mx.float32, "float16": mx.float16, "bfloat16": mx.bfloat16}
+    agent = Agent(tiny_checkpoint, dtype=dtype)
+    assert agent.dtype == DTYPES[dtype]
+    result = agent.predict("hello", {"q": {"type": "noul", "instructions": "?"}})
+    assert 0.0 <= result["answers"]["q"]["noul"] <= 1.0

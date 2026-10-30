@@ -5,7 +5,6 @@ import warnings
 from pathlib import Path, PurePosixPath
 from typing import Dict, List, Optional, Union
 
-import mlx.core as mx
 import numpy as np
 from huggingface_hub import snapshot_download
 
@@ -17,13 +16,23 @@ from .common import (
     serialize_state,
     uses_parallel_layout,
 )
-from .model import DecisionModel, EncoderConfig, sanitize_weights
 from .prepared import PrefixCache
 from .revisions import resolve_revision, snapshot_revision, verify_digests
 from .runtime import RuntimeMixin
-from .tokenizer import Tokenizer
 
-DTYPES = {"float32": mx.float32, "float16": mx.float16, "bfloat16": mx.bfloat16}
+
+def __getattr__(name):
+    # Importing host methods/signatures must not require a native MLX installation.
+    # The public dtype mapping still contains real MLX dtypes, resolved on first use.
+    if name == "DTYPES":
+        if name in globals():
+            return globals()[name]
+        import mlx.core as mx
+
+        value = {"float32": mx.float32, "float16": mx.float16, "bfloat16": mx.bfloat16}
+        globals()[name] = value
+        return value
+    raise AttributeError("module %r has no attribute %r" % (__name__, name))
 
 
 def resolve_model(
@@ -143,10 +152,16 @@ class Agent(RuntimeMixin):
             raise ValueError(
                 "This distribution uses MLX; PyTorch/CUDA/ONNX backend options require official laya"
             )
+        import mlx.core as mx
+
+        from .model import DecisionModel, EncoderConfig, sanitize_weights
+        from .tokenizer import Tokenizer
+
+        dtypes = __getattr__("DTYPES")
         if device == "mps":
             device = "gpu"
-        if dtype not in DTYPES:
-            raise ValueError(f"dtype must be one of {list(DTYPES)}")
+        if dtype not in dtypes:
+            raise ValueError(f"dtype must be one of {list(dtypes)}")
         if device not in (None, "gpu", "metal", "cpu"):
             raise ValueError("MLX device must be 'gpu', 'metal', or 'cpu'")
         if not isinstance(batch_size, int) or isinstance(batch_size, bool) or batch_size < 1:
@@ -154,7 +169,7 @@ class Agent(RuntimeMixin):
         self.device = (
             mx.default_device() if device is None else (mx.cpu if device == "cpu" else mx.gpu)
         )
-        self.dtype = DTYPES[dtype]
+        self.dtype = dtypes[dtype]
         self.batch_size = batch_size
         if pad_to_multiple is not None and (
             not isinstance(pad_to_multiple, int)
@@ -226,6 +241,8 @@ class Agent(RuntimeMixin):
 
     def forward(self, batch):
         """Run one prepared batch and return evaluated MLX logits on this agent's device."""
+        import mlx.core as mx
+
         with mx.stream(self.device):
             tensors = {k: mx.array(v) for k, v in batch.items()}
             result = self._inference(**tensors)
@@ -421,6 +438,11 @@ def load(
 def clear_cache():
     """Release unused native allocations; live/in-flight arrays remain referenced."""
     import gc
+    import sys
 
     gc.collect()
-    mx.clear_cache()
+    # A router used only for host routing or attached test/custom runners has no
+    # native allocations. Do not load the backend merely to clear an empty cache.
+    mx = sys.modules.get("mlx.core")
+    if mx is not None:
+        mx.clear_cache()

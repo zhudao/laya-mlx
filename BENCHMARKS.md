@@ -1,6 +1,6 @@
 # Local benchmarks
 
-The current v0.4.12 migration is tracked in the [qualification report](docs/QUALIFICATION_0_4_12.md), including the final FP32 matrix, alternating-order repeats, correctness gates and memory limitations. Historical experiments below retain their original scope.
+The latest performance qualification is the 0.5.0 (upstream v0.4.12) [qualification report](docs/QUALIFICATION_0_4_12.md), including the final FP32 matrix, alternating-order repeats, correctness gates and memory limitations. Release 0.6.0 (upstream v0.4.17) changes host logic only; its real-checkpoint fidelity was re-checked, but performance was not re-measured. Historical experiments below retain their original scope.
 
 ## Initial v0.4.12 feature matrix (before bounded shape cache)
 

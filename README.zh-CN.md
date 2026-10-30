@@ -1,26 +1,21 @@
 # Laya-MLX
 
-![Laya MLX 实际运行记录，原速回放](docs/assets/snake-demo.gif)
+**开放权重的类型化决策模型，在 Apple Silicon 上原生运行。**
 
-**在 Apple Silicon 上本地运行开放权重的结构化决策模型。**
+[English](https://github.com/mizorewww/laya-mlx/blob/main/README.md) · [使用参考](https://github.com/mizorewww/laya-mlx/blob/main/docs/USAGE.md) · [基准测试](https://github.com/mizorewww/laya-mlx/blob/main/BENCHMARKS.md) · [Hugging Face 权重](https://huggingface.co/aac6fef/laya-mlx) · [更新日志](https://github.com/mizorewww/laya-mlx/blob/main/CHANGELOG.md)
 
-单个短问题端到端中位耗时 **13.4 ms**；multilingual 检查点为 **7.4 ms**。**0 个输出 token**，原生 MLX，无 PyTorch / Transformers 推理依赖，无云端 API。
+Laya 专门回答有固定答案范围的问题：从几个选项里挑一个、按评分标准打分、判断一句话真不真。
+它只做一次双向前向计算，直接给出校准后的概率，不逐个生成 token，也不需要解析输出的 JSON。
+本项目用 [MLX](https://github.com/ml-explore/mlx) 运行 [Laya](https://github.com/NandhaKishorM/laya)
+原版权重，不依赖 PyTorch、Transformers 或任何云端 API。
 
-[English](README.md) · [完整 benchmark](BENCHMARKS.md) · [Snake 使用说明](docs/SNAKE_DEMO.md) · [30 秒 MP4](docs/assets/snake-demo.mp4)
+M3 Max、FP16 下，一个简短的英文问题中位延迟 **13.4 ms**，多语言模型 **7.4 ms**。
 
-GIF 使用真实游戏记录按原始时间戳渲染。每步都调用 Laya，界面显示循环路径安全层及其接管次数。上面的 13.4 / 7.4 ms 来自**单问题 API 基准**，并非每步批量回答三个问题的 Snake 帧耗时；游戏速度见[独立报告](docs/SNAKE_BENCHMARKS.md)。
-
-## 0.5.0：对齐上游 v0.4.12
-
-当前源码以 `ffc142012af63d015fa19f05f29f9c5ff329a2cc` 为上游目标，已加入批量、长文本、
-structured decisions、hooks、校准、评测、HTTP/MCP 和框架/工具集成；
-[验收记录](docs/UPSTREAM_0412_PROGRESS.json) 列明正确性、性能、安装包证据及剩余检查和限制。
-历史基准只代表报告记录的版本。原生 MLX 执行、精度选择、编译和提示词缓存保持可用。
-`Router()` 默认驻留上限改为官方的两个模型；指定 `max_loaded=1` 可保留原先上限。
-具体接口、兼容性变化和额外依赖见[英文迁移说明](README.md#050-upstream-v0412-migration)，
-验证状态见[进度记录](docs/UPSTREAM_0412_PROGRESS.json)。
+![Laya MLX 玩贪吃蛇：真实决策，原速录制](https://raw.githubusercontent.com/mizorewww/laya-mlx/main/docs/assets/snake-demo.gif)
 
 ## 快速开始
+
+需要 Apple Silicon、macOS 14+ 和 Python 3.11+。
 
 ```bash
 pip install laya-mlx
@@ -29,95 +24,18 @@ pip install laya-mlx
 ```python
 import laya_mlx as laya
 
-agent = laya.load("aac6fef/laya-multilingual-mlx")
+agent = laya.load("aac6fef/laya-mlx")
 result = agent.predict(
-    "发票被重复扣款，请退款。",
-    {
-        "department": {
-            "type": "choice",
-            "instructions": "Who should handle this?",
-            "criteria": ["billing", "technical", "sales"],
-        }
-    },
-)
-print(result["answers"]["department"])
-```
-
-运行贪吃蛇：
-
-```bash
-pip install 'laya-mlx[demo]'
-hf download aac6fef/laya-multilingual-mlx
-laya-snake
-```
-
-提前下载一次权重，游戏运行期间完全本地推理。终端至少 104 列 × 35 行；空格暂停、↑/↓ 调速、R 重开、Q 退出。`--max-speed` 持续满速运行，每一步等待新的模型结果。
-
-`laya-snake --optimize --max-speed` 启用已验证的编译与前缀复用路径。同轮成对测试中，2,400 步达到 **75.40 步/秒**，零死亡、安全接管 2 次，比 eager 基线快约 **6.5%**。[完整游戏表现、优化测量和一致性证据](docs/SNAKE_OPTIMIZATION.md)。
-
-## M3 Max 实测
-
-| FP16，端到端 | Laya 421M | Multilingual 322M |
-|---|---:|---:|
-| 单个短问题 P50 | **13.42 ms** | **7.39 ms** |
-| 单个短问题 P95 | **13.92 ms** | **7.79 ms** |
-| 50 问题吞吐量 | **146.8 q/s** | **395.0 q/s** |
-| 单个短问题 MLX 峰值分配 | **943.6 MiB** | **687.6 MiB** |
-
-硬件为 M3 Max（40 核 GPU、128 GiB 内存）。计时包含提示准备、tokenization、张量构建、GPU 同步推理、校准及结果格式化，排除模型加载。50 问题吞吐量使用 `batch_size=64`，公开 API 默认为 16。
-
-**移植一致性：**三个检查点在 FP32 和 FP16 下均通过 **63/63** 验证问题的上游 argmax 对齐，合计 378/378；每个配置各执行 100 次重复调用，结果有限、确定，测得活跃内存增长为零。它验证移植保真度，不代表所有实际问题都能答对。[完整误差和原始记录](BENCHMARKS.md)。
-
-`choice` 返回分类概率，`score` 返回有序评分，`noul` 返回 P(true)。每个问题作为独立行经过双向编码器；不宣称任意问题可以复用同一份 state hidden states。本项目是独立 MLX 移植，并非 Convai Innovations 官方发布。
-
-## 支持的检查点
-
-| 检查点 | 编码器 | 参数量 | 最大上下文 |
-|---|---|---:|---:|
-| `convaiinnovations/laya` | ModernBERT-large | 421M | 512 |
-| `convaiinnovations/laya-multilingual` | mmBERT-base | 322M | 1,024 |
-| `convaiinnovations/laya-typed-decisions` | ModernBERT-large | 421M | 1,024 |
-
-上下文预算包含问题、选项和输入状态。中文等非英语输入应使用 multilingual 检查点。本项目实现推理与权重转换；RLCD 训练和微调继续使用上游项目。
-
-已转换的 FP16 MLX 权重发布在 Hugging Face，可直接传给 `laya.load(...)`：
-
-- [aac6fef/laya-mlx](https://huggingface.co/aac6fef/laya-mlx)
-- [aac6fef/laya-multilingual-mlx](https://huggingface.co/aac6fef/laya-multilingual-mlx)
-- [aac6fef/laya-typed-decisions-mlx](https://huggingface.co/aac6fef/laya-typed-decisions-mlx)
-
-例如：`laya.load("aac6fef/laya-multilingual-mlx")`。每个模型仓库都包含模型卡、测试结果、来源、许可证和文件校验清单。三个仓库共 36 个文件均已通过严格远端校验；固定版本与权重哈希见 [hub-publication.json](benchmarks/results/hub-publication.json)。
-
-## 安装与运行
-
-需要 Apple silicon Mac、macOS 14+ 和 Python 3.11+。本机实测环境为 M3 Max（40 核 GPU、128 GB 内存）、macOS 27.2、Python 3.12.13、MLX 0.32.2。MLX 0.32.2 提供 macOS 14 / 15 / 26 的 wheel，本机选择了 26 构建；未在这台机器上实测旧系统。
-
-```bash
-gh repo clone mizorewww/laya-mlx
-cd laya-mlx
-uv sync
-uv run python examples/quickstart.py
-```
-
-或从 GitHub 直接安装：
-
-```bash
-python -m pip install 'git+https://github.com/mizorewww/laya-mlx.git'
-```
-
-Python 示例：
-
-```python
-import laya_mlx as laya
-
-agent = laya.load("aac6fef/laya-multilingual-mlx")
-result = agent.predict(
-    "发票被重复扣款，请今天退款。",
+    "I was billed twice. Please refund the duplicate.",
     {
         "department": {
             "type": "choice",
             "instructions": "Which department should handle this request?",
-            "criteria": ["billing", "technical", "sales"],
+            "criteria": {
+                "billing": "Payments, invoices, refunds, and duplicate charges.",
+                "technical": "Broken features, errors, and product troubleshooting.",
+                "sales": "Pricing, upgrades, and new purchases.",
+            },
         },
         "refund": {
             "type": "noul",
@@ -125,113 +43,96 @@ result = agent.predict(
         },
     },
 )
-print(result["answers"])
+print(result["answers"]["department"]["choice"])  # billing
 ```
 
-默认使用 FP16。需要更接近原版 FP32 的数值时使用 `dtype="float32"`。`batch_size=16` 控制每次计算的问题数，更多问题会分批处理。概率按原版格式保留四位小数；不同精度可能造成小幅差异，实测误差见 benchmark 报告。
+像上面这样给每个选项写上说明，效果远好于只给标签名。首次加载会下载模型，之后的推理完全在本地进行。
 
-跟随上游 v0.3.5，校准温度在使用前会被钳制到 `[0.5, 5.0]`：检查点自带的 `choice:11+` 桶为 0.1006，会把 logits 锐化约 10 倍，将接近随机的答案报告成近乎确定。原始值仍可通过 `agent.temperature_raw` 和 `agent.temperature_by_options_raw` 查看，加载时会对每个被钳制的桶发出 `RuntimeWarning`。
+## 问题类型
 
-命令行支持文本或 JSON 状态：
+| 类型 | 你提供 | 你得到 |
+|---|---|---|
+| `choice` | 若干选项：列表，或「标签 → 说明」字典 | 每个选项的概率 |
+| `score` | 有序的评分档位 | 每档的概率和期望档位 |
+| `noul` | 一个是非命题 | 为真的概率 |
+
+输入状态可以是文本、类 JSON 字典或对话列表。每个答案都附带校准概率和置信度；
+在新任务上，置信度高不代表一定答对。
+
+## 模型
+
+| 预转换 MLX 版（FP16） | 原版 | 参数量 | 上下文 | 用途 |
+|---|---|---:|---:|---|
+| [`aac6fef/laya-mlx`](https://huggingface.co/aac6fef/laya-mlx) | `convaiinnovations/laya` | 421M | 512 | 英文 |
+| [`aac6fef/laya-multilingual-mlx`](https://huggingface.co/aac6fef/laya-multilingual-mlx) | `convaiinnovations/laya-multilingual` | 322M | 1,024 | 多语言输入 |
+| [`aac6fef/laya-typed-decisions-mlx`](https://huggingface.co/aac6fef/laya-typed-decisions-mlx) | `convaiinnovations/laya-typed-decisions` | 421M | 1,024 | 上游 typed-decisions 工作流 |
+
+`laya.load` 两列的 ID 都能用。上下文长度把指令、选项和状态算在一起。
+每个发布的模型都带有模型卡、验证结果、来源说明和校验和（[固定版本与哈希](https://github.com/mizorewww/laya-mlx/blob/main/benchmarks/results/hub-publication.json)）。
+
+## 其他功能
+
+详见[使用参考](https://github.com/mizorewww/laya-mlx/blob/main/docs/USAGE.md)：
+
+- **语言路由**：`Router()` 自动识别语言、选择模型，默认最多常驻两个；也可以注册自己的模型。
+- **批量与长文档**：`predict_batch` 对问题结构相同的请求共用前向计算；长文本扫描会保留答案出自哪一段。
+- **置信度门槛**：`min_confidence=` 把低置信度答案标记出来供人工复核，答案本身不变。
+- **超多选项**：`predict_shortlist`（先用向量筛选）和 `predict_tournament`（分组淘汰，不需要嵌入模型）。
+- **吞吐优化**：重复负载可开启 `compile=True`、`pad_to_multiple=16`、`cache_prompts=True`。
+- **工具与服务**：命令行（`laya-mlx predict`）、HTTP（`laya-mlx-serve`）、MCP（`laya-mlx-mcp-server`）、评估与校准，以及 LangChain/LlamaIndex/CrewAI/Agno 集成，按需安装 extras。
+- **导出**：`laya-mlx convert` 生成独立的 MLX 模型目录。
+
+## 性能
+
+M3 Max（40 核 GPU，128 GiB），FP16，端到端：
+
+| | Laya 421M | 多语言 322M |
+|---|---:|---:|
+| 单个短问题 P50 / P95 | **13.42 / 13.92 ms** | **7.39 / 7.79 ms** |
+| 50 个问题吞吐 | **146.8 问/秒** | **395.0 问/秒** |
+| 单个问题 MLX 峰值内存 | 943.6 MiB | 687.6 MiB |
+
+计时包含提示词构造、分词、推理、校准和结果格式化，不含模型加载。吞吐一行使用
+`batch_size=64`（默认 16）。实际延迟随输入长度、问题数量和系统负载变化。
+
+三个模型在 FP32 和 FP16 下都与上游在 **63/63 道验证题**上选出相同答案（共 378/378 次比对），
+重复调用结果一致，未测到内存增长。这衡量的是移植是否忠实，不是任务准确率。
+[测量方法、全部计时样本与概率误差](https://github.com/mizorewww/laya-mlx/blob/main/BENCHMARKS.md)。
+
+## 贪吃蛇演示
+
+上面的 GIF 是一次真实的本地运行，原速录制：每一步都向 Laya 提三个问题，
+画面上可见的安全层会拦下危险的走法。
 
 ```bash
-uv run laya-mlx predict \
-  --model aac6fef/laya-multilingual-mlx \
-  --state '发票被重复扣款，请退款。' \
-  --questions examples/questions.json
+pip install 'laya-mlx[demo]'
+hf download aac6fef/laya-multilingual-mlx
+laya-snake                      # 按节奏运行；加 --max-speed 取消节奏限制
+laya-snake --optimize --max-speed
 ```
 
-本仓库已下载的权重位于 `models/` 时，将 `--model` 改成相应本地目录即可避免再次下载。
+终端至少 104 × 35。空格暂停，↑/↓ 调速，R 重开，Q 退出。开启 `--optimize` 后，
+在 M3 Max 上实测 **2,400 步内达到 75.4 步/秒**，零死亡。
+[演示说明](https://github.com/mizorewww/laya-mlx/blob/main/docs/SNAKE_DEMO.md) ·
+[速度与稳定性](https://github.com/mizorewww/laya-mlx/blob/main/docs/SNAKE_BENCHMARKS.md) ·
+[优化细节](https://github.com/mizorewww/laya-mlx/blob/main/docs/SNAKE_OPTIMIZATION.md)。
 
-## 转换权重
+## 与上游的关系
 
-```bash
-uv run laya-mlx convert \
-  --model convaiinnovations/laya \
-  --dtype float16 \
-  --output models/laya-mlx-fp16
-```
+这是独立移植，不是 Convai Innovations 的官方发布。提示词格式、校准、路由、输出结构和主机侧 API
+跟随 [NandhaKishorM/laya](https://github.com/NandhaKishorM/laya) **v0.4.17**；编码器和决策头用 MLX
+重新实现。CUDA、ONNX、PyTorch 后端控制和训练不在范围内，RLCD 训练与微调请使用上游项目。
+[原生边界](https://github.com/mizorewww/laya-mlx/blob/main/docs/USAGE.md#upstream-compatibility) ·
+[v0.4.17 迁移记录](https://github.com/mizorewww/laya-mlx/blob/main/docs/MIGRATION_0_4_17.md) ·
+[全部文档](https://github.com/mizorewww/laya-mlx/blob/main/docs/README.md)。
 
-转换后可以通过 `laya.load("./models/laya-mlx-fp16")` 直接加载。输出目录包含模型、配置、tokenizer 和来源元数据。已有目录不会被覆盖，模型权重不会提交到 GitHub。
+## 参与贡献
 
-原始检查点本身存储的是 FP16 权重；这里的转换调整参数命名与计算精度，不涉及重新训练或低比特量化。
+欢迎提 issue 和 PR。与上游保持一致的修复优先于新功能。开发环境、测试、基准和发版流程见
+[CONTRIBUTING.md](https://github.com/mizorewww/laya-mlx/blob/main/CONTRIBUTING.md)。
 
-## 路由、测试和 benchmark
+## 许可证
 
-`Router`、`triage_questions`、`email_questions`、`guard_questions`、`moderation_questions` 等接口保留上游用法，将导入名改为 `laya_mlx` 即可。typed-decisions 检查点可通过 `task="typed_decisions"` 显式指定；`Router(preload=True)` 可预加载三个模型。模型加载/卸载由可重入锁保护，多线程并发调用会共享同一个 Agent，不会重复构建；推理本身不被串行化。
-
-无法识别的拉丁文字语言（罗马尼亚语、波兰语、捷克语、土耳其语等）现在会依据非英语字母比例路由到多语言检查点，而不再被静默当作英语；`detect_language(state)` 会返回 `language_undecided` 和 `diacritic_rate` 等证据字段。
-
-选项很多的 `choice` 问题可以用 `predict_shortlist` 先做 embedding 预筛（默认 top-20，余弦相似度），再只对保留的选项运行一次 `predict`;`embed_fn_from_agent(agent)` 直接复用已加载的编码器做均值池化，无需下载额外权重。该功能为显式 opt-in,`Agent.predict` 的行为不变。
-
-详细的 API、测试和复现命令见 [英文 README](README.md)。[BENCHMARKS.md](BENCHMARKS.md) 包含本机 PyTorch MPS FP32、MLX FP32 与 MLX FP16 的端到端 P50/P95、吞吐量、内存、数值一致性、重复运行和固定抽样分类测试。所有原始测量数据位于 [benchmarks/results](benchmarks/results)，GPU 测试应串行运行。
-
-[初步性能研究](docs/PERFORMANCE_RESEARCH.md) 分析实现、基准和 MLX 源码。针对“能否再快一个数量级”，另有两份深入报告：
-
-- [数学分析](docs/MATH_10X_RESEARCH.md)：计算预算、带宽条件下界、真实权重谱、精确复用，以及蒸馏学生模型的设计空间。
-- [工程实测](docs/ENGINEERING_10X_RESEARCH.md)：编译、量化、最后一层输出裁剪、自定义 Metal 核与矩阵乘法实验。
-
-[experiments/](experiments) 保存研究脚本和原始数据。发布版本的结果见 [BENCHMARKS.md](BENCHMARKS.md)，各实验变体的耗时与数值一致性单独记录。
-
-目前证据不支持相同检查点下普遍再快 10 倍。部分场景的逐轮配对中位加速约为 1.03–1.08 倍；误差区间、量化保真结果和自定义 Metal 核的实测详见工程报告。
-
-这是独立的 MLX 移植，模型能力及其限制来自上游；模型输出概率不等于答案必然正确。采用 Apache-2.0，原作者与移植说明见 [NOTICE](NOTICE)。
-
-
-### 上游 v0.4.1 运行时移植
-
-v0.4.0 已选择性移植上游 `1adc59f`（v0.4.1）。**默认行为变更：**`Router()` 对语言
-不确定的文本改用 multilingual，包括 `refund me` 这样的短句；已识别的英语仍走 english。
-需要保留旧回退策略时，使用 `Router(default="english")`。默认仍只驻留一个模型；频繁切换
-语言时可设置 `max_loaded=2` 或预加载。
-
-- 冷加载不再占用生命周期全局锁，已加载模型及状态查询不必等待；同一检查点的并发加载
-  仍共享一次构建。`unload(name)` 只等待同一检查点，`unload()` 等待全部构建完成。
-  卸载/淘汰释放 MLX 空闲缓存，不会使调用方或正在推理的请求持有的模型失效。
-  清理的是进程级空闲缓存，后续请求可能需要重新分配缓冲区。
-- `models={"billing": "./models/billing-mlx"}`、`register(name, source, description=None)`、
-  `unregister(name)`、`registered` 支持独立命名的微调模型。替换源会失效旧驻留模型，
-  并防止加载中的旧源重新进入缓存。内置模型及当前默认模型不能被注销。
-- `Agent.predict` / `Router.predict` 支持 `min_confidence=0.8`，或
-  `min_confidence={"choice:2": 0.8, "choice:11+": 0.95, "default": 0.7}`。
-  输出增加 `abstention`（`passed` / `abstained` / `unevaluated`）、实际门槛及低置信度标记；
-  答案仍保留，不会自动调用其他模型。未设置门槛时输出不增加这些字段。
-  未配置的桶回退到 `default`，再回退到零；非法桶名、NaN 和无穷门槛提前报错。
-  门槛依据 `answer_confidence`，temperature clamp 本身不保证概率校准。
-- `predict_tournament(agent_or_router, state, questions, group_size=16, **kwargs)`
-  无需 embedding 模型，通过分组选优逐轮缩减大选项集合；会增加推理次数，分组及早期淘汰
-  可能影响结果。返回概率、置信度和 `usage` 只覆盖最后一轮；`tournament[qid]` 记录
-  最终 `labels`、原始数量 `n` 和淘汰轮数 `rounds`。
-- 完整支持配置为 `option_layout="parallel"` 的新检查点：共享选项位置编码、隔离选项的
-  attention mask、编译推理、前缀缓存及转换回读。未配置时仍采用 sequential，未知值报错。
-  **不要直接修改旧权重配置来启用 parallel**，这属于训练时的输入布局。
-  新布局已针对小型随机模型验证选项重排不变性，不代表新权重的业务准确率。
-  CPU 的 parallel 路径使用 FP32 中间计算，避开托管 macOS 26 的半精度原生算子崩溃；
-  权重存储精度不变，GPU 继续使用请求的精度。
-- 修复全大写缩写/地址被误判为法语或西班牙语的问题，同时保护强调大写及混合文字；
-  修复 `Envoyé depuis mon iPhone` 等法语设备签名的清理。
-
-以下历史验证使用 sequential `573e5b6` 与 parallel layout `1adc59f`；
-当前 CI 的两种布局对照均固定到 v0.4.12。三个已发布检查点的 FP32/FP16 重新验证通过 378/378 个 argmax 对齐，
-每组 100 次重复调用均为有限、确定输出，活跃内存增长为零
-（[原始验证报告](benchmarks/results/upstream-v041-validation.json)）。当时发布的选择性移植未包含 batch/长文档、structured decisions、hooks 和 HTTP/MCP；
-上述尚未发布的迁移已接入这些 host 接口。训练及其他后端执行仍属于适配边界。使用示例及复现命令见[英文 README](README.md#upstream-v041-runtime-port)。
-
-### v0.3.5 之后的上游修复
-
-已选择性移植上游 `4aa6761`（v0.3.23 源码树）的输入处理、语言路由及邮件清理修复；
-这不代表支持上游全部 API。当时的神经网络架构对照固定在 `573e5b6`；当前 CI 已对齐 v0.4.12。
-
-- 长对话列表截断时保留最新内容；字符串和字典保留开头。启用 prefix cache 时规则相同。
-- `noul` 的 criteria 只接受 `false` / `true`（支持 Python 布尔键）；
-  可用 `labels={"false": "no", "true": "yes"}` 改变显示词，结果仍是 P(true)。
-  错误的键现在会报错，不再静默丢弃。结构化 instructions 保留原始 Unicode。
-- 空 instructions、空 score level（`None`）和 `None` state 会报错，问题校验错误包含问题 ID。
-- 新增 `answer_confidence`，表示温度校准后的最大选项概率；旧 `confidence` 含义不变。
-  两者都不保证新任务上的准确率。
-- `usage` 新增 `state_tokens`、`state_tokens_dropped`（各问题中的最大丢弃量）、
-  `truncated` 和 `truncated_questions`。选项被截成相同 token 时，`usage.options`
-  报告对应问题的 `total`、`distinct`、`tokens_per_option`，不改变模型预测或选项顺序。
-- 增量 preload 保留已加载模型，`preload([])` 不加载任何模型；空语言提示回退到检测，
-  无法判定的拉丁文字遵循 Router 的 default，检测覆盖嵌套字符串和混合语言。
-- 邮件清理不再因正文中的 confidential、Thanks for the reply 或 From: 误删请求。
+Apache-2.0，见 [LICENSE](https://github.com/mizorewww/laya-mlx/blob/main/LICENSE) 与
+[NOTICE](https://github.com/mizorewww/laya-mlx/blob/main/NOTICE)。Laya 及其预训练权重归 Convai Innovations
+和上游贡献者所有。神经网络结构参照 Laya 与 Hugging Face ModernBERT 实现。

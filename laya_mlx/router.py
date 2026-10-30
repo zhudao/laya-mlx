@@ -251,13 +251,23 @@ def match_typed_decisions_workflow(questions: Dict[str, Any]) -> Optional[str]:
 
 
 def _question_schema(questions: Dict[str, Any]) -> str:
-    """Order-sensitive signature of a question schema, for sharing forward passes.
+    """Order- and type-sensitive signature for sharing forward passes.
 
-    sort_keys=False keeps insertion order significant at every nesting level, because
-    option order is positional in render_options. default=str matches render_criterion's
-    tolerance, so schemas that render identically still share a group.
+    JSON object keys lose their Python types: 1 and "1" both become "1". Those types
+    survive in public question IDs and choice answers, so encode dictionaries as ordered
+    pairs with typed keys before serializing. Tag containers too, so a caller's list cannot
+    collide with an encoded dictionary. Keep insertion order at every nesting level because
+    option order is positional in render_options.
     """
-    return json.dumps(questions, sort_keys=False, ensure_ascii=False, default=str)
+
+    def typed(value):
+        if isinstance(value, dict):
+            return ("dict", [(typed(key), typed(item)) for key, item in value.items()])
+        if isinstance(value, (list, tuple)):
+            return (type(value).__name__, [typed(item) for item in value])
+        return (type(value).__name__, value)
+
+    return json.dumps(typed(questions), ensure_ascii=False, default=str)
 
 
 # Subtags that mean "the English checkpoint can read this". Routing needs one bit -- is this
@@ -1267,12 +1277,17 @@ class Router(HookRegistry):
         hooks=None,
         hooks_raise: Optional[bool] = None,
         hooks_timeout: Optional[float] = None,
+        *,
+        explain: bool = False,
     ) -> RouteDecision:
         """Decide which checkpoint to use, then let `on_route` hooks observe or replace it.
 
         `ctx.decision` is the `RouteDecision`; a hook may replace it (for example to pin a
         checkpoint) and the replacement is what gets returned and used. `hooks` are per-call
         hooks, appended after any installed on the Router.
+
+        `explain=True` adds language diagnostics when built-in detection runs. Explicit routing
+        overrides still skip it. A hook can replace the decision, including its diagnostics.
         """
         if questions is not None and not isinstance(questions, dict):
             raise TypeError(
@@ -1280,7 +1295,13 @@ class Router(HookRegistry):
                 % type(questions).__name__
             )
         decision = self._route(
-            state, questions, model=model, task=task, lang=lang, lang_guess=lang_guess
+            state,
+            questions,
+            model=model,
+            task=task,
+            lang=lang,
+            lang_guess=lang_guess,
+            **({"explain": True} if explain else {}),
         )
         raise_errors = self.hooks_raise if hooks_raise is None else bool(hooks_raise)
         active = compose_hooks(self.hooks, hooks)
@@ -1306,6 +1327,8 @@ class Router(HookRegistry):
         task: Optional[str] = None,
         lang: Optional[str] = None,
         lang_guess: Optional[Any] = None,
+        *,
+        explain: bool = False,
     ) -> RouteDecision:
         """Decide which checkpoint to use, without loading or running anything.
 
@@ -1388,7 +1411,7 @@ class Router(HookRegistry):
                     workflow=workflow,
                 )
 
-        det = analyse(state)
+        det = analyse(state, explain=True) if explain else analyse(state)
         if det["script"] == "unknown":
             key = self.default
             reason = "no letters detected in state; using default (%s)" % key
@@ -1759,6 +1782,7 @@ class Router(HookRegistry):
         *,
         hooks=None,
         hooks_raise: Optional[bool] = None,
+        explain: bool = False,
     ) -> List[RouteDecision]:
         """Route a heterogeneous request batch without loading any checkpoints.
 
@@ -1776,6 +1800,7 @@ class Router(HookRegistry):
                 every request's ``on_route`` dispatch, as on :meth:`route`.
             hooks (HookArg): Per-call hook or sequence of hooks for this call.
             hooks_raise: Override the Router's ``hooks_raise`` policy for this call.
+            explain: Include built-in language diagnostics for each request that uses detection.
         """
         if not isinstance(requests, SequenceABC) or isinstance(requests, (str, bytes)):
             raise TypeError("requests must be a sequence of request dictionaries")
@@ -1810,6 +1835,7 @@ class Router(HookRegistry):
                     hooks=hooks,
                     hooks_raise=hooks_raise,
                     hooks_timeout=hooks_timeout,
+                    **({"explain": True} if explain else {}),
                 )
             )
 

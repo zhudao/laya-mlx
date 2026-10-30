@@ -24,7 +24,6 @@ import warnings
 from collections import OrderedDict
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
-import mlx.core as mx
 import numpy as np
 
 from .common import render_options, serialize_state
@@ -253,8 +252,13 @@ def embed_fn_from_agent(
     if isinstance(batch_size, bool) or not isinstance(batch_size, int) or batch_size < 1:
         raise ValueError("batch_size must be a positive integer, got %r" % (batch_size,))
 
-    tok = agent.tok
-    encoder = agent.model.encoder
+    tok = getattr(agent, "tok", None)
+    encoder = getattr(getattr(agent, "model", None), "encoder", None)
+    if tok is None or encoder is None:
+        raise TypeError("agent must provide tok and model.encoder")
+
+    import mlx.core as mx
+
     device = agent.device
 
     def embed_fn(texts: Sequence[str]) -> np.ndarray:
