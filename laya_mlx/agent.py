@@ -10,10 +10,9 @@ from huggingface_hub import snapshot_download
 
 from .common import (
     QTYPES,
+    _state_token_ids,
     build_sequence,
-    encode_text,
     read_temperatures,
-    serialize_state,
     uses_parallel_layout,
 )
 from .prepared import PrefixCache
@@ -284,11 +283,7 @@ class Agent(RuntimeMixin):
         # re-serializing and re-tokenizing it inside build_sequence per question was pure
         # duplicated work. Tokenize in full and let build_sequence slice per question, so
         # left-truncation for conversation lists keeps its meaning.
-        state_ids = encode_text(
-            self.tok,
-            serialize_state(state).replace(self.tok.mask_token, " "),
-            add_special_tokens=False,
-        )["input_ids"]
+        state_ids = _state_token_ids(self.tok, state)
         items = []
         for qid in ids:
             q = internal[qid]
@@ -344,12 +339,38 @@ class Agent(RuntimeMixin):
     def _forward(self, batch):
         width = batch["marker_pos"].shape[1]
         rows = len(batch["input_ids"])
+        lengths = batch["attention_mask"].sum(axis=1)
+        counts = batch["marker_mask"].sum(axis=1)
+        multiple = getattr(self, "pad_to_multiple", None)
+        limit = getattr(self, "encoder_cfg", {}).get(
+            "max_position_embeddings", self.cfg.get("max_len", 512)
+        )
+        order = np.arange(rows)
+        if rows > self.batch_size:
+            candidate = np.argsort(lengths, kind="stable")
+            padded_lengths = lengths
+            if multiple:
+                padded_lengths = np.minimum(
+                    ((lengths + multiple - 1) // multiple) * multiple, limit
+                )
+
+            def padded_tokens(indices):
+                total = 0
+                for start in range(0, rows, self.batch_size):
+                    part = indices[start : start + self.batch_size]
+                    total += len(part) * int(padded_lengths[part].max())
+                return total
+
+            # Reorder only when grouping actually reduces native padding. The
+            # host still sees its original row order, including hooks and usage.
+            if padded_tokens(candidate) < padded_tokens(order):
+                order = candidate
         logits, actions = [], []
         for start in range(0, rows, self.batch_size):
             items = []
-            for row in range(start, min(rows, start + self.batch_size)):
-                n = int(batch["attention_mask"][row].sum())
-                count = int(batch["marker_mask"][row].sum())
+            for row in order[start : start + self.batch_size]:
+                n = int(lengths[row])
+                count = int(counts[row])
                 item = {
                     "ids": batch["input_ids"][row, :n],
                     "markers": batch["marker_pos"][row, :count],
@@ -361,10 +382,8 @@ class Agent(RuntimeMixin):
             arrays = collate_items(
                 items,
                 self.tok.pad_token_id,
-                pad_to_multiple=getattr(self, "pad_to_multiple", None),
-                max_length=getattr(self, "encoder_cfg", {}).get(
-                    "max_position_embeddings", self.cfg.get("max_len", 512)
-                ),
+                pad_to_multiple=multiple,
+                max_length=limit,
             )
             out, act = self.forward(arrays)
             out, act = np.asarray(out), np.asarray(act)
@@ -377,7 +396,11 @@ class Agent(RuntimeMixin):
             logits.append(padded)
             act = np.exp(act - act.max(axis=-1, keepdims=True))
             actions.append(act / act.sum(axis=-1, keepdims=True))
-        return np.concatenate(logits), np.concatenate(actions)
+        logits, actions = np.concatenate(logits), np.concatenate(actions)
+        if not np.array_equal(order, np.arange(rows)):
+            restore = np.argsort(order)
+            logits, actions = logits[restore], actions[restore]
+        return logits, actions
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         self._inference = None

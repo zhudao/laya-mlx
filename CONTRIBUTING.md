@@ -79,3 +79,20 @@ prepared folders the same way.
 The release workflow reruns CI, checks that the tag and all three versions agree, builds and
 `twine check`s the wheel and sdist, publishes to PyPI with the `PYPI_API_TOKEN` secret, and creates a
 GitHub release. Any failure stops the release before publishing.
+
+Upstream releases are ported and released without a maintainer. Renovate opens a PR on
+`renovate/upstream-laya` for each upstream tag, Claude Code ports it there following
+[.github/upstream-port.md](.github/upstream-port.md), and when every check passes and CI is green the
+PR is merged, tagged and released. Real-checkpoint validation and the wheel smoke test are not part
+of that path; run them afterwards.
+
+New issues get an automated first reply, and `@claude` in a comment asks Claude Code for more.
+Pull requests get an automated review. Claude only reads and decides; replies, closes, approvals,
+commits and merges are made under the maintainer's account with the `MAINTAINER_TOKEN` secret.
+A pull request from a contributor outside the repository is closed when it is not needed, and
+otherwise taken over without waiting for the author: conflicts with `main` resolved, redundant
+code and tests removed, problems fixed, committed as the maintainer with Claude as co-author, and
+squash-merged once CI passes. The changes go to the contributor's branch when "Allow edits by
+maintainers" is on, else to an `adopt/pr-<n>` pull request that closes the original when it
+merges. Pull requests that change `.github/` are never merged automatically, and collaborators'
+pull requests get a review only.
