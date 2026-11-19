@@ -3,11 +3,17 @@ name: Upstream port
 # Renovate opens renovate/upstream-laya when NandhaKishorM/laya tags a release
 # (see renovate.json). This job ports that release with Claude Code and pushes
 # the result to the same branch, so CI runs on it and a human merges and tags.
+# When CI fails on the port's commit, ci-heal.yml starts this again with fix_run:
+# Claude fixes the failure, or the failed jobs are rerun when it is not the port's.
 
 on:
   pull_request:
     types: [opened, reopened]
   workflow_dispatch:
+    inputs:
+      fix_run:
+        description: Failed CI run to fix (set by ci-heal.yml)
+        default: ""
 
 permissions:
   contents: write
@@ -23,12 +29,40 @@ env:
   BRANCH: renovate/upstream-laya
 
 jobs:
+  # A fix (fix_run) needs the port's commit on the branch, with at most five fixing
+  # commits; without it the port runs from the start.
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      run: ${{ steps.gate.outputs.run }}
+      mode: ${{ steps.gate.outputs.mode }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.BRANCH }}
+          fetch-depth: 0
+          persist-credentials: false
+      - id: gate
+        env:
+          FIX_RUN: ${{ inputs.fix_run }}
+        run: |
+          run=true mode=port
+          fixes=$(git log --format=%B origin/main..HEAD | grep -c '^Co-Authored-By: Claude' || true)
+          if [ -n "$FIX_RUN" ] && [ "$fixes" -gt 0 ]; then
+            mode=fix
+            [ "$fixes" -le 5 ] || run=false
+          fi
+          { echo "run=$run"; echo "mode=$mode"; } >> "$GITHUB_OUTPUT"
+
   port:
+    needs: gate
     if: >-
-      github.event_name == 'workflow_dispatch' ||
+      needs.gate.outputs.run == 'true' &&
+      (github.event_name != 'pull_request' ||
       (github.event.pull_request.head.ref == 'renovate/upstream-laya' &&
        github.event.pull_request.head.repo.full_name == github.repository &&
-       github.event.pull_request.user.login == 'renovate[bot]')
+       github.event.pull_request.user.login == github.repository_owner))
     runs-on: macos-26
     timeout-minutes: 300
     env:
@@ -68,10 +102,11 @@ jobs:
       - uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          # The Claude GitHub App does not act for Renovate; push with GITHUB_TOKEN.
+          # The port works on public code only; keep its transcript in the log.
+          show_full_output: true
+          # Push with GITHUB_TOKEN; the next step starts CI on the result.
           github_token: ${{ secrets.GITHUB_TOKEN }}
-          # The trigger is renovate[bot]; the branch lives in this repository.
-          allowed_bots: renovate
+          # Renovate (renovate.yml) opens the PR as the maintainer, on a branch in this repository.
           restrict_untrusted_prs: "false"
           claude_args: >-
             --model claude-opus-5-5
@@ -79,6 +114,14 @@ jobs:
             --allowedTools Bash,Read,Edit,Write,Glob,Grep,TodoWrite
           prompt: |
             Port upstream NandhaKishorM/laya ${{ steps.range.outputs.new_tag }} into this repository.
+            ${{ needs.gate.outputs.mode == 'fix' && format('
+            The port is already committed on the branch, but CI run {0} failed on it. Fix that
+            failure: `gh run view {0} --log-failed` shows what failed. Find the cause, fix it as
+            .github/upstream-port.md allows (never by weakening a check or a test), run its
+            checks again, then commit, push, label and comment as it says. If the failure is
+            not the port''s (a runner, network or flaky failure), change nothing and comment
+            that; the workflow then reruns the failed jobs.
+            ', inputs.fix_run) || '' }}
 
             - Repository: ${{ github.repository }}, branch ${{ env.BRANCH }} (already checked out), pull request #${{ steps.range.outputs.pr }}.
             - Current port: ${{ steps.range.outputs.old_tag }} (${{ steps.range.outputs.old_sha }}).
@@ -87,12 +130,20 @@ jobs:
 
             Read .github/upstream-port.md and follow it exactly. In that file OLD/NEW stand for the commits
             above and OLD_VERSION for the current port's version without the leading v.
-      # A push with GITHUB_TOKEN starts no workflow, so run CI on the port explicitly;
-      # upstream-release.yml acts when it passes.
+            Run every command in the foreground and wait for it to finish; the job ends when you answer.
+      # A push with GITHUB_TOKEN starts no workflow, so run CI on the port explicitly,
+      # as the maintainer: a run GITHUB_TOKEN starts would not start upstream-release.yml
+      # (or a fix here) when it completes.
       - name: Run CI on the port
-        if: always()
+        if: ${{ !cancelled() }}
+        env:
+          GH_TOKEN: ${{ secrets.MAINTAINER_TOKEN }}
+          FAILED_RUN: ${{ needs.gate.outputs.mode == 'fix' && inputs.fix_run || '' }}
         run: |
           git fetch -q origin "$BRANCH"
           if [ "$(git rev-parse "origin/$BRANCH")" != "${{ steps.range.outputs.start }}" ]; then
             gh workflow run ci.yml --ref "$BRANCH"
+          elif [ -n "$FAILED_RUN" ]; then
+            # Nothing to change: the failure was not the port's, so try the failed jobs again.
+            gh run rerun "$FAILED_RUN" --failed
           fi

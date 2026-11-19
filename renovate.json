@@ -5,6 +5,11 @@
     ":dependencyDashboard"
   ],
   "timezone": "Asia/Shanghai",
+  "rebaseWhen": "conflicted",
+  "commitBody": "Co-Authored-By: Renovate Bot <bot@renovateapp.com>",
+  "gitIgnoredAuthors": [
+    "41898282+claude[bot]@users.noreply.github.com"
+  ],
   "customManagers": [
     {
       "customType": "regex",
@@ -23,15 +28,14 @@
   "packageRules": [
     {
       "description": "Everything except upstream: detect and list on the Dependency Dashboard, open a PR only when ticked there",
-      "matchPackageNames": [
-        "*",
+      "matchDepNames": [
         "!NandhaKishorM/laya"
       ],
       "dependencyDashboardApproval": true
     },
     {
       "description": "Upstream releases: one PR on a fixed branch, which upstream-port.yml hands to Claude Code",
-      "matchPackageNames": [
+      "matchDepNames": [
         "NandhaKishorM/laya"
       ],
       "branchTopic": "upstream-laya",

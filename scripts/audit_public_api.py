@@ -11,7 +11,7 @@ import json
 import subprocess
 from pathlib import Path
 
-PIN = "80a1da1fa5448ea12163f4d977935625a0aea670"
+PIN = "b1d656952f0f9581ea691a70cb6f38abf3eb13a9"
 BACKEND_MODULES = {
     "train.py",
     "train_cli.py",
@@ -33,7 +33,12 @@ BACKEND_CALLABLES = {
     "build_model",
     "amp_dtype",
 }
-EXTENDED = {("agent.py", "Agent.__init__"), ("agent.py", "load"), ("router.py", "Router.__init__")}
+EXTENDED = {
+    ("agent.py", "Agent.__init__"),
+    ("agent.py", "load"),
+    ("router.py", "Router.__init__"),
+    ("shortlist.py", "embed_fn_from_agent"),
+}
 
 
 def signature(node):
