@@ -64,14 +64,13 @@ def open_pr(branch):
 
 
 def port_busy(branch):
-    for status in ("queued", "in_progress", "waiting", "pending"):
-        runs = api("GET", f"repos/{REPO}/actions/workflows/{PORT_WORKFLOW}/runs?status={status}")
-        if any(
-            r["head_branch"] == branch or r["event"] == "workflow_dispatch"
-            for r in runs["workflow_runs"]
-        ):
-            return True
-    return False
+    # Recent runs unfiltered: the status filter misses a run dispatched seconds ago.
+    runs = api("GET", f"repos/{REPO}/actions/workflows/{PORT_WORKFLOW}/runs?per_page=20")
+    return any(
+        r["status"] != "completed"
+        and (r["head_branch"] == branch or r["event"] == "workflow_dispatch")
+        for r in runs["workflow_runs"]
+    )
 
 
 def start_port(branch, fix_run=""):
@@ -207,6 +206,15 @@ def main():
     if failed and not real and run["run_attempt"] < MAX_ATTEMPTS:
         api("POST", f"repos/{REPO}/actions/runs/{RUN_ID}/rerun-failed-jobs")
         done("Reran " + ", ".join(j["name"] for j in failed) + ": they did not fail in a step.")
+    # A step failure is retried once before anyone changes code: timing-sensitive tests fail
+    # now and then on loaded runners. Renovate's own commit still needs its port, so not there.
+    unported = (
+        branch.startswith("renovate/")
+        and "Co-Authored-By: Claude" not in run["head_commit"]["message"]
+    )
+    if failed and run["run_attempt"] == 1 and not unported:
+        api("POST", f"repos/{REPO}/actions/runs/{RUN_ID}/rerun-failed-jobs")
+        done("Reran " + ", ".join(j["name"] for j in failed) + " once to rule out a flaky failure.")
     print("Failed in a step: " + ", ".join(j["name"] for j in real or failed))
 
     if adopted:
