@@ -78,6 +78,33 @@ class Embeddings(nn.Module):
         return self.norm(self.tok_embeddings(ids))
 
 
+def _local_attention(q, k, v, mask, scale, window):
+    """Use the existing bidirectional mask over each block's relevant keys."""
+    length = q.shape[2]
+    block_size = 128
+    # Preserve the key tile alignment used by Metal SDPA.
+    halo = ((window // 2 + 31) // 32) * 32
+    # Fold short tails into the previous block to keep matrix SDPA dispatch.
+    vector_threshold = 8
+    chunks = []
+    for start in range(0, max(1, length - vector_threshold), block_size):
+        end = start + block_size
+        if length - end <= vector_threshold:
+            end = length
+        left = max(start - halo, 0)
+        right = min(end + halo, length)
+        chunks.append(
+            mx.fast.scaled_dot_product_attention(
+                q[..., start:end, :],
+                k[..., left:right, :],
+                v[..., left:right, :],
+                scale=scale,
+                mask=mask[..., start:end, left:right],
+            )
+        )
+    return mx.concatenate(chunks, axis=2)
+
+
 class EncoderAttention(nn.Module):
     def __init__(self, cfg, kind):
         super().__init__()
@@ -87,7 +114,7 @@ class EncoderAttention(nn.Module):
         self.Wqkv = nn.Linear(cfg.hidden_size, 3 * cfg.hidden_size, bias=cfg.attention_bias)
         self.Wo = nn.Linear(cfg.hidden_size, cfg.hidden_size, bias=cfg.attention_bias)
 
-    def __call__(self, x, mask, position_ids=None):
+    def __call__(self, x, mask, position_ids=None, *, block_window=None):
         b, length, _ = x.shape
         qkv = self.Wqkv(x).reshape(b, length, 3, self.num_heads, self.head_dim)
         q, k, v = [qkv[:, :, i].transpose(0, 2, 1, 3) for i in range(3)]
@@ -101,7 +128,11 @@ class EncoderAttention(nn.Module):
         else:
             q = rotary_positions(q, position_ids, self.base)
             k = rotary_positions(k, position_ids, self.base)
-        out = mx.fast.scaled_dot_product_attention(q, k, v, scale=self.head_dim**-0.5, mask=mask)
+        scale = self.head_dim**-0.5
+        if block_window is None:
+            out = mx.fast.scaled_dot_product_attention(q, k, v, scale=scale, mask=mask)
+        else:
+            out = _local_attention(q, k, v, mask, scale, block_window)
         return self.Wo(out.transpose(0, 2, 1, 3).reshape(b, length, -1))
 
 
@@ -129,8 +160,8 @@ class EncoderLayer(nn.Module):
         self.mlp_norm = nn.LayerNorm(cfg.hidden_size, eps=cfg.norm_eps, bias=cfg.norm_bias)
         self.mlp = EncoderMLP(cfg)
 
-    def __call__(self, x, mask, position_ids=None):
-        x = x + self.attn(self.attn_norm(x), mask, position_ids)
+    def __call__(self, x, mask, position_ids=None, *, block_window=None):
+        x = x + self.attn(self.attn_norm(x), mask, position_ids, block_window=block_window)
         return x + self.mlp(self.mlp_norm(x))
 
 
@@ -182,6 +213,11 @@ class ModernBert(nn.Module):
         self.final_norm = nn.LayerNorm(cfg.hidden_size, eps=cfg.norm_eps, bias=cfg.norm_bias)
 
     def __call__(self, input_ids, attention_mask, position_ids=None, option_ids=None):
+        return self._encode(input_ids, attention_mask, position_ids, option_ids, pipeline=False)
+
+    def _encode(
+        self, input_ids, attention_mask, position_ids, option_ids, *, pipeline, block_local=False
+    ):
         if (position_ids is None) != (option_ids is None):
             raise ValueError("position_ids and option_ids must be provided together")
         x = self.embeddings(input_ids)
@@ -196,8 +232,33 @@ class ModernBert(nn.Module):
             masks = parallel_option_masks(
                 attention_mask, position_ids, option_ids, self.config.local_attention
             )
-        for layer in self.layers:
-            x = layer(x, masks[layer.attention_type], position_ids)
+        # Start Metal early, then double the chunk size to amortize submissions
+        # as the GPU accumulates enough queued work to overlap graph construction.
+        next_submit = 1 if pipeline else None
+        window = self.config.local_attention
+        block_window = (
+            window
+            if block_local
+            and self.config.head_dim == 64
+            and isinstance(window, int)
+            and 0 <= window <= 128
+            else None
+        )
+        if block_window is not None:
+            # A padded query can outlive every valid key in its block.
+            masks["sliding_attention"] = masks["sliding_attention"] | mx.eye(
+                input_ids.shape[1], dtype=mx.bool_
+            )
+        for depth, layer in enumerate(self.layers, 1):
+            x = layer(
+                x,
+                masks[layer.attention_type],
+                position_ids,
+                block_window=block_window if layer.attention_type == "sliding_attention" else None,
+            )
+            if depth == next_submit:
+                mx.async_eval(x, masks)
+                next_submit = 2 * depth + 1
         return self.final_norm(x)
 
 
@@ -285,6 +346,33 @@ class DecisionModel(nn.Module):
         if self.parallel != (option_ids is not None):
             raise ValueError("Batch option layout does not match checkpoint option_layout")
         h = self.encoder(input_ids, attention_mask, position_ids, option_ids)
+        return self._decision(h, attention_mask, marker_pos, marker_mask, qtype)
+
+    def _pipelined(
+        self,
+        input_ids,
+        attention_mask,
+        marker_pos,
+        marker_mask,
+        qtype,
+        position_ids=None,
+        option_ids=None,
+    ):
+        if self.parallel or position_ids is not None or option_ids is not None:
+            return self(
+                input_ids, attention_mask, marker_pos, marker_mask, qtype, position_ids, option_ids
+            )
+        h = self.encoder._encode(
+            input_ids,
+            attention_mask,
+            None,
+            None,
+            pipeline=input_ids.shape[0] == 1,
+            block_local=input_ids.shape[1] >= 768,
+        )
+        return self._decision(h, attention_mask, marker_pos, marker_mask, qtype)
+
+    def _decision(self, h, attention_mask, marker_pos, marker_mask, qtype):
         h = h + self.type_emb(qtype)[:, None, :]
         # Only CLS and option markers are read after the final head layer. Keep
         # full attention, but omit unused output projections and token-wise FFNs.
@@ -293,10 +381,11 @@ class DecisionModel(nn.Module):
         )
         h = self.head(h, attention_mask[:, None, None, :].astype(mx.bool_), positions)
         markers = h[:, 1:]
-        if self.parallel:
+        if self.parallel or mx.default_device() == mx.cpu:
             # Accumulate the one-channel projection in FP32. MLX 0.32 CPU FP16
             # matmul can mix adjacent rows here, breaking permutation equivariance
-            # even when every encoder/head hidden state is exactly equivariant.
+            # even when every encoder/head hidden state is exactly equivariant,
+            # and can read outside its input (SIGBUS) for a single short sequence.
             norm, hidden, activation, output = self.scorer.layers
             features = activation(hidden(norm(markers))).astype(mx.float32)
             logits = (
@@ -312,7 +401,9 @@ class DecisionModel(nn.Module):
         top = mx.sort(p, axis=-1)[:, -2:]
         features = mx.stack([top[:, 1], top[:, 1] - top[:, 0], entropy, k / 255.0], axis=-1)
         pooled = mx.concatenate([h[:, 0].astype(mx.float32), features], axis=-1)
-        if self.parallel and mx.default_device() == mx.cpu:
+        if mx.default_device() == mx.cpu and (
+            self.parallel or self.act_head.layers[0].weight.dtype != mx.float32
+        ):
             # Do not cast back to FP16 at the action head: its narrow CPU
             # projections can hit the same native half-precision failure.
             first, activation, last = self.act_head.layers
